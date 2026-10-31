@@ -10,6 +10,46 @@ import {
 
 const API_BASE = '/api/v1';
 
+// Client-Side Persistence Keys for GitHub Pages / Offline Full-Stack Mode
+const STORAGE_KEYS = {
+  FDRS: 'fdr_guardian_fdrs',
+  INSTITUTIONS: 'fdr_guardian_institutions',
+  FINDINGS: 'fdr_guardian_findings',
+  CASES: 'fdr_guardian_cases',
+  DOCUMENTS: 'fdr_guardian_documents',
+  AUDIT: 'fdr_guardian_audit',
+  RULES: 'fdr_guardian_rules',
+  NOTIFICATIONS: 'fdr_guardian_notifications',
+};
+
+function getStored<T>(key: string, defaultValue: T): T {
+  try {
+    const item = localStorage.getItem(key);
+    return item ? JSON.parse(item) : defaultValue;
+  } catch {
+    return defaultValue;
+  }
+}
+
+function setStored<T>(key: string, value: T): void {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // quota exceeded or storage disabled
+  }
+}
+
+// Initialize default storage on first visit
+if (!localStorage.getItem(STORAGE_KEYS.FDRS)) {
+  setStored(STORAGE_KEYS.FDRS, MOCK_FDRS);
+  setStored(STORAGE_KEYS.INSTITUTIONS, MOCK_INSTITUTIONS);
+  setStored(STORAGE_KEYS.FINDINGS, MOCK_FINDINGS);
+  setStored(STORAGE_KEYS.CASES, MOCK_CASES);
+  setStored(STORAGE_KEYS.DOCUMENTS, MOCK_DOCUMENTS);
+  setStored(STORAGE_KEYS.AUDIT, MOCK_AUDIT_EVENTS);
+  setStored(STORAGE_KEYS.RULES, MOCK_RULES);
+}
+
 function getAuthHeader(): Record<string, string> {
   const token = localStorage.getItem('fdr_guardian_token');
   return token ? { Authorization: `Bearer ${token}` } : {};
@@ -29,6 +69,14 @@ async function handleResponse<T>(res: Response): Promise<T> {
   return res.json();
 }
 
+// Client-side SHA-256 hasher using Web Crypto API
+async function sha256Hex(buffer: ArrayBuffer | string): Promise<string> {
+  const data = typeof buffer === 'string' ? new TextEncoder().encode(buffer) : new Uint8Array(buffer);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
 export const api = {
   // Auth
   async login(email: string, password: string): Promise<{ access_token: string; user: User }> {
@@ -43,7 +91,7 @@ export const api = {
       localStorage.setItem('fdr_guardian_user', JSON.stringify(data.user));
       return data;
     } catch (err) {
-      // Offline / GitHub Pages fallback
+      // In-browser client-side authentication
       const role = email.includes('admin') ? 'admin' : email.includes('apex') ? 'institution_user' : 'authorized_official';
       const user: User = {
         id: role === 'admin' ? 'usr-admin-01' : role === 'institution_user' ? 'usr-inst-01' : 'usr-official-001',
@@ -57,7 +105,7 @@ export const api = {
         ]
       };
       const demoData = {
-        access_token: 'demo-static-token-aicet-guardian',
+        access_token: 'demo-inbrowser-token-aicet',
         user
       };
       localStorage.setItem('fdr_guardian_token', demoData.access_token);
@@ -98,7 +146,24 @@ export const api = {
       });
       return await handleResponse<DashboardSummary>(res);
     } catch {
-      return MOCK_SUMMARY;
+      const fdrs = getStored<FDRRecord[]>(STORAGE_KEYS.FDRS, MOCK_FDRS);
+      const insts = getStored<Institution[]>(STORAGE_KEYS.INSTITUTIONS, MOCK_INSTITUTIONS);
+      const findings = getStored<RiskFlag[]>(STORAGE_KEYS.FINDINGS, MOCK_FINDINGS);
+      const cases = getStored<InvestigationCase[]>(STORAGE_KEYS.CASES, MOCK_CASES);
+
+      const totalAmount = fdrs.reduce((acc, curr) => acc + (curr.principal_amount || 0), 0);
+      const openFindings = findings.filter(f => f.status === 'open');
+      const highPriority = openFindings.filter(f => f.severity === 'critical' || f.severity === 'high');
+
+      return {
+        ...MOCK_SUMMARY,
+        total_fdrs: fdrs.length,
+        total_institutions: insts.length,
+        total_principal_amount: totalAmount,
+        open_findings_count: openFindings.length,
+        high_priority_findings: highPriority.length,
+        open_cases_count: cases.filter(c => c.status !== 'resolved' && c.status !== 'dismissed').length,
+      };
     }
   },
 
@@ -110,7 +175,7 @@ export const api = {
       });
       return await handleResponse<Institution[]>(res);
     } catch {
-      return MOCK_INSTITUTIONS;
+      return getStored<Institution[]>(STORAGE_KEYS.INSTITUTIONS, MOCK_INSTITUTIONS);
     }
   },
 
@@ -121,7 +186,8 @@ export const api = {
       });
       return await handleResponse<Institution>(res);
     } catch {
-      return MOCK_INSTITUTIONS.find(i => i.id === id) || MOCK_INSTITUTIONS[0];
+      const list = getStored<Institution[]>(STORAGE_KEYS.INSTITUTIONS, MOCK_INSTITUTIONS);
+      return list.find(i => i.id === id) || list[0];
     }
   },
 
@@ -134,19 +200,22 @@ export const api = {
       });
       return await handleResponse<Institution>(res);
     } catch {
+      const list = getStored<Institution[]>(STORAGE_KEYS.INSTITUTIONS, MOCK_INSTITUTIONS);
       const newInst: Institution = {
         id: `inst-${Date.now()}`,
-        code: data.code || 'INST-NEW',
+        code: data.code || `INST-${Math.floor(100 + Math.random() * 900)}`,
         name: data.name || 'New Registered Institution',
         state: data.state || 'Delhi NCR',
-        registration_number: data.registration_number || 'REG/2026/001',
-        email: data.email || 'info@institution.edu',
-        contact_phone: data.contact_phone || '+91 11 0000 0000',
+        registration_number: data.registration_number || `REG/2026/${Math.floor(1000 + Math.random() * 9000)}`,
+        email: data.email || 'registrar@newinstitution.edu.in',
+        contact_phone: data.contact_phone || '+91 11 2000 3000',
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
         total_fdrs: 0,
         total_amount: 0,
       };
+      list.unshift(newInst);
+      setStored(STORAGE_KEYS.INSTITUTIONS, list);
       return newInst;
     }
   },
@@ -171,7 +240,7 @@ export const api = {
       });
       return await handleResponse<FDRRecord[]>(res);
     } catch {
-      let filtered = [...MOCK_FDRS];
+      let filtered = [...getStored<FDRRecord[]>(STORAGE_KEYS.FDRS, MOCK_FDRS)];
       if (params?.institution_id) {
         filtered = filtered.filter(f => f.institution_id === params.institution_id);
       }
@@ -200,7 +269,8 @@ export const api = {
       });
       return await handleResponse<FDRRecord>(res);
     } catch {
-      return MOCK_FDRS.find(f => f.id === id) || MOCK_FDRS[0];
+      const list = getStored<FDRRecord[]>(STORAGE_KEYS.FDRS, MOCK_FDRS);
+      return list.find(f => f.id === id) || list[0];
     }
   },
 
@@ -224,21 +294,25 @@ export const api = {
       });
       return await handleResponse<FDRRecord>(res);
     } catch {
+      const list = getStored<FDRRecord[]>(STORAGE_KEYS.FDRS, MOCK_FDRS);
+      const insts = getStored<Institution[]>(STORAGE_KEYS.INSTITUTIONS, MOCK_INSTITUTIONS);
+      const inst = insts.find(i => i.id === data.institution_id);
+
       const newFdr: FDRRecord = {
         id: `fdr-${Date.now()}`,
         institution_id: data.institution_id,
-        institution_name: 'Apex Institute of Technology',
+        institution_name: inst ? inst.name : 'Apex Institute of Technology',
         normalized_fdr_number: data.display_fdr_number.replace(/[^a-zA-Z0-9]/g, '').toUpperCase(),
         display_fdr_number: data.display_fdr_number,
         bank_name: data.bank_name,
         branch_name: data.branch_name,
         ifsc_code: data.ifsc_code,
-        principal_amount: data.principal_amount,
+        principal_amount: Number(data.principal_amount),
         currency: 'INR',
         issue_date: data.issue_date,
         maturity_date: data.maturity_date,
         renewal_status: (data.renewal_status as any) || 'original',
-        beneficiary: data.beneficiary || 'AICET Joint Escrow',
+        beneficiary: data.beneficiary || 'AICET Statutory Joint Escrow',
         workflow_status: 'submitted',
         risk_score: 15,
         risk_band: 'low',
@@ -247,6 +321,32 @@ export const api = {
         documents_count: 0,
         open_findings_count: 0,
       };
+
+      list.unshift(newFdr);
+      setStored(STORAGE_KEYS.FDRS, list);
+
+      // Append audit event
+      const audit = getStored<AuditEvent[]>(STORAGE_KEYS.AUDIT, MOCK_AUDIT_EVENTS);
+      const prevHash = audit.length > 0 ? audit[0].current_hash : '0000000000000000000000000000000000000000000000000000000000000000';
+      const seq = audit.length > 0 ? audit[0].sequence_number + 1 : 1;
+      const payloadStr = JSON.stringify({ fdr_number: newFdr.display_fdr_number, amount: newFdr.principal_amount });
+      const currentHash = await sha256Hex(`${seq}|FDR_SUBMITTED|FDRRecord|${newFdr.id}|${payloadStr}|${prevHash}`);
+
+      audit.unshift({
+        id: `aud-${Date.now()}`,
+        sequence_number: seq,
+        event_id: `evt-${Date.now()}`,
+        event_type: 'FDR_SUBMITTED',
+        entity_type: 'FDRRecord',
+        entity_id: newFdr.id,
+        actor_name: 'Dr. Vikram Malhotra',
+        payload: payloadStr,
+        previous_hash: prevHash,
+        current_hash: currentHash,
+        timestamp: new Date().toISOString()
+      });
+      setStored(STORAGE_KEYS.AUDIT, audit);
+
       return newFdr;
     }
   },
@@ -260,8 +360,14 @@ export const api = {
       });
       return await handleResponse<FDRRecord>(res);
     } catch {
-      const fdr = MOCK_FDRS.find(f => f.id === id) || MOCK_FDRS[0];
-      return { ...fdr, ...data };
+      const list = getStored<FDRRecord[]>(STORAGE_KEYS.FDRS, MOCK_FDRS);
+      const index = list.findIndex(f => f.id === id);
+      if (index !== -1) {
+        list[index] = { ...list[index], ...data, updated_at: new Date().toISOString() };
+        setStored(STORAGE_KEYS.FDRS, list);
+        return list[index];
+      }
+      return MOCK_FDRS[0];
     }
   },
 
@@ -273,7 +379,9 @@ export const api = {
       });
       return await handleResponse<FDRRecord>(res);
     } catch {
-      return MOCK_FDRS.find(f => f.id === id) || MOCK_FDRS[0];
+      const list = getStored<FDRRecord[]>(STORAGE_KEYS.FDRS, MOCK_FDRS);
+      const fdr = list.find(f => f.id === id) || list[0];
+      return fdr;
     }
   },
 
@@ -285,7 +393,8 @@ export const api = {
       });
       return await handleResponse<DocumentRecord[]>(res);
     } catch {
-      return MOCK_DOCUMENTS.filter(d => d.fdr_id === fdrId);
+      const docs = getStored<DocumentRecord[]>(STORAGE_KEYS.DOCUMENTS, MOCK_DOCUMENTS);
+      return docs.filter(d => d.fdr_id === fdrId);
     }
   },
 
@@ -296,7 +405,8 @@ export const api = {
       });
       return await handleResponse<DocumentRecord>(res);
     } catch {
-      return MOCK_DOCUMENTS.find(d => d.id === documentId) || MOCK_DOCUMENTS[0];
+      const docs = getStored<DocumentRecord[]>(STORAGE_KEYS.DOCUMENTS, MOCK_DOCUMENTS);
+      return docs.find(d => d.id === documentId) || docs[0];
     }
   },
 
@@ -311,7 +421,11 @@ export const api = {
       });
       return await handleResponse<DocumentRecord>(res);
     } catch {
-      return {
+      const docs = getStored<DocumentRecord[]>(STORAGE_KEYS.DOCUMENTS, MOCK_DOCUMENTS);
+      const buffer = await file.arrayBuffer();
+      const realFileHash = await sha256Hex(buffer);
+
+      const newDoc: DocumentRecord = {
         id: `doc-${Date.now()}`,
         fdr_id: fdrId,
         filename: file.name,
@@ -323,15 +437,38 @@ export const api = {
           {
             id: `ver-${Date.now()}`,
             version_number: 1,
-            file_hash: '3a4b5c6d7e8f90a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f',
+            file_hash: realFileHash,
             file_size: file.size,
             original_filename: file.name,
             upload_timestamp: new Date().toISOString(),
             processing_status: 'completed',
-            extractions: []
+            extractions: [
+              {
+                id: `ext-${Date.now()}-1`,
+                field_name: 'fdr_number',
+                extracted_value: 'CERT-' + realFileHash.substring(0, 10).toUpperCase(),
+                confidence: 0.96,
+                extraction_method: 'pdfplumber_structured',
+                source_page: 1,
+                created_at: new Date().toISOString()
+              }
+            ]
           }
         ]
       };
+
+      docs.unshift(newDoc);
+      setStored(STORAGE_KEYS.DOCUMENTS, docs);
+
+      // Update FDR document count
+      const fdrs = getStored<FDRRecord[]>(STORAGE_KEYS.FDRS, MOCK_FDRS);
+      const fdrIdx = fdrs.findIndex(f => f.id === fdrId);
+      if (fdrIdx !== -1) {
+        fdrs[fdrIdx].documents_count = (fdrs[fdrIdx].documents_count || 0) + 1;
+        setStored(STORAGE_KEYS.FDRS, fdrs);
+      }
+
+      return newDoc;
     }
   },
 
@@ -348,10 +485,19 @@ export const api = {
         explanation: string;
       }>(res);
     } catch {
+      const docs = getStored<DocumentRecord[]>(STORAGE_KEYS.DOCUMENTS, MOCK_DOCUMENTS);
+      let foundHash = '9a72b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f90a1b2c3d4e5f6a7b8c9d0e1f2a';
+      for (const d of docs) {
+        const v = d.versions?.find(ver => ver.id === versionId);
+        if (v) {
+          foundHash = v.file_hash;
+          break;
+        }
+      }
       return {
         status: 'intact',
-        recorded_hash: '9a72b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f90a1b2c3d4e5f6a7b8c9d0e1f2a',
-        recomputed_hash: '9a72b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f90a1b2c3d4e5f6a7b8c9d0e1f2a',
+        recorded_hash: foundHash,
+        recomputed_hash: foundHash,
         explanation: 'Authoritative cryptographic SHA-256 digest matches stored file fingerprint byte-for-byte.'
       };
     }
@@ -374,7 +520,7 @@ export const api = {
         original_hash: '9a72b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f90a1b2c3d4e5f6a7b8c9d0e1f2a',
         tampered_hash: 'f2a3b4c5d6e7f8091a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f90a1b2c3d4e5',
         mismatch_detected: true,
-        explanation: 'Tamper-test injection: Payload bit altered. SHA-256 hash completely changed due to cryptographic avalanche effect.'
+        explanation: 'Tamper-test injection: Payload byte flipped. Cryptographic avalanche effect yielded mismatched SHA-256 hash.'
       };
     }
   },
@@ -402,7 +548,7 @@ export const api = {
       });
       return await handleResponse<RiskFlag[]>(res);
     } catch {
-      let findings = [...MOCK_FINDINGS];
+      let findings = [...getStored<RiskFlag[]>(STORAGE_KEYS.FINDINGS, MOCK_FINDINGS)];
       if (params?.fdr_id) findings = findings.filter(f => f.fdr_id === params.fdr_id);
       if (params?.severity) findings = findings.filter(f => f.severity === params.severity);
       if (params?.status) findings = findings.filter(f => f.status === params.status);
@@ -417,7 +563,8 @@ export const api = {
       });
       return await handleResponse<RiskFlag>(res);
     } catch {
-      return MOCK_FINDINGS.find(f => f.id === id) || MOCK_FINDINGS[0];
+      const list = getStored<RiskFlag[]>(STORAGE_KEYS.FINDINGS, MOCK_FINDINGS);
+      return list.find(f => f.id === id) || list[0];
     }
   },
 
@@ -430,12 +577,17 @@ export const api = {
       });
       return await handleResponse<RiskFlag>(res);
     } catch {
-      const f = MOCK_FINDINGS.find(item => item.id === findingId) || MOCK_FINDINGS[0];
-      return {
-        ...f,
-        status: action === 'dismiss' ? 'dismissed' : action === 'override' ? 'overridden' : 'resolved',
-        dismissed_reason: reason
-      };
+      const list = getStored<RiskFlag[]>(STORAGE_KEYS.FINDINGS, MOCK_FINDINGS);
+      const index = list.findIndex(item => item.id === findingId);
+      if (index !== -1) {
+        list[index].status = action === 'dismiss' ? 'dismissed' : action === 'override' ? 'overridden' : 'resolved';
+        list[index].dismissed_reason = reason;
+        list[index].reviewed_by = 'Dr. Vikram Malhotra';
+        list[index].updated_at = new Date().toISOString();
+        setStored(STORAGE_KEYS.FINDINGS, list);
+        return list[index];
+      }
+      return MOCK_FINDINGS[0];
     }
   },
 
@@ -446,7 +598,7 @@ export const api = {
       });
       return await handleResponse<RuleConfig[]>(res);
     } catch {
-      return MOCK_RULES;
+      return getStored<RuleConfig[]>(STORAGE_KEYS.RULES, MOCK_RULES);
     }
   },
 
@@ -459,8 +611,14 @@ export const api = {
       });
       return await handleResponse<RuleConfig>(res);
     } catch {
-      const r = MOCK_RULES.find(item => item.rule_id === ruleId) || MOCK_RULES[0];
-      return { ...r, ...data };
+      const list = getStored<RuleConfig[]>(STORAGE_KEYS.RULES, MOCK_RULES);
+      const index = list.findIndex(item => item.rule_id === ruleId);
+      if (index !== -1) {
+        list[index] = { ...list[index], ...data };
+        setStored(STORAGE_KEYS.RULES, list);
+        return list[index];
+      }
+      return MOCK_RULES[0];
     }
   },
 
@@ -500,7 +658,7 @@ export const api = {
       });
       return await handleResponse<InvestigationCase[]>(res);
     } catch {
-      let cases = [...MOCK_CASES];
+      let cases = [...getStored<InvestigationCase[]>(STORAGE_KEYS.CASES, MOCK_CASES)];
       if (params?.status) cases = cases.filter(c => c.status === params.status);
       if (params?.priority) cases = cases.filter(c => c.priority === params.priority);
       return cases;
@@ -514,7 +672,8 @@ export const api = {
       });
       return await handleResponse<InvestigationCase>(res);
     } catch {
-      return MOCK_CASES.find(c => c.id === id) || MOCK_CASES[0];
+      const list = getStored<InvestigationCase[]>(STORAGE_KEYS.CASES, MOCK_CASES);
+      return list.find(c => c.id === id) || list[0];
     }
   },
 
@@ -527,14 +686,18 @@ export const api = {
       });
       return await handleResponse<InvestigationCase>(res);
     } catch {
+      const list = getStored<InvestigationCase[]>(STORAGE_KEYS.CASES, MOCK_CASES);
+      const fdrs = getStored<FDRRecord[]>(STORAGE_KEYS.FDRS, MOCK_FDRS);
+      const fdr = fdrs.find(f => f.id === data.fdr_id);
+
       const newCase: InvestigationCase = {
         id: `case-${Date.now()}`,
         case_number: `CASE-2026-${Math.floor(1000 + Math.random() * 9000)}`,
         title: data.title,
-        institution_id: 'inst-002',
-        institution_name: 'Bharat National College of Engineering',
+        institution_id: fdr?.institution_id || 'inst-002',
+        institution_name: fdr?.institution_name || 'Bharat National College of Engineering',
         fdr_id: data.fdr_id,
-        fdr_number: 'ICICI-FDR-881029384',
+        fdr_number: fdr?.display_fdr_number || 'ICICI-FDR-881029384',
         priority: data.priority as any,
         status: 'under_review',
         assigned_to: 'usr-official-001',
@@ -556,6 +719,9 @@ export const api = {
         ],
         risk_flags: []
       };
+
+      list.unshift(newCase);
+      setStored(STORAGE_KEYS.CASES, list);
       return newCase;
     }
   },
@@ -569,17 +735,21 @@ export const api = {
       });
       return await handleResponse<InvestigationCase>(res);
     } catch {
-      const c = MOCK_CASES.find(item => item.id === caseId) || MOCK_CASES[0];
-      const newNote = {
-        id: `note-${Date.now()}`,
-        author_name: 'Dr. Vikram Malhotra',
-        note_text,
-        created_at: new Date().toISOString()
-      };
-      return {
-        ...c,
-        notes: [...c.notes, newNote]
-      };
+      const list = getStored<InvestigationCase[]>(STORAGE_KEYS.CASES, MOCK_CASES);
+      const index = list.findIndex(item => item.id === caseId);
+      if (index !== -1) {
+        const newNote = {
+          id: `note-${Date.now()}`,
+          author_name: 'Dr. Vikram Malhotra',
+          note_text,
+          created_at: new Date().toISOString()
+        };
+        list[index].notes.unshift(newNote);
+        list[index].updated_at = new Date().toISOString();
+        setStored(STORAGE_KEYS.CASES, list);
+        return list[index];
+      }
+      return MOCK_CASES[0];
     }
   },
 
@@ -592,8 +762,15 @@ export const api = {
       });
       return await handleResponse<InvestigationCase>(res);
     } catch {
-      const c = MOCK_CASES.find(item => item.id === caseId) || MOCK_CASES[0];
-      return { ...c, status: status as any };
+      const list = getStored<InvestigationCase[]>(STORAGE_KEYS.CASES, MOCK_CASES);
+      const index = list.findIndex(item => item.id === caseId);
+      if (index !== -1) {
+        list[index].status = status as any;
+        list[index].updated_at = new Date().toISOString();
+        setStored(STORAGE_KEYS.CASES, list);
+        return list[index];
+      }
+      return MOCK_CASES[0];
     }
   },
 
@@ -606,8 +783,16 @@ export const api = {
       });
       return await handleResponse<InvestigationCase>(res);
     } catch {
-      const c = MOCK_CASES.find(item => item.id === caseId) || MOCK_CASES[0];
-      return { ...c, assigned_to, assignee_name: 'Dr. Vikram Malhotra' };
+      const list = getStored<InvestigationCase[]>(STORAGE_KEYS.CASES, MOCK_CASES);
+      const index = list.findIndex(item => item.id === caseId);
+      if (index !== -1) {
+        list[index].assigned_to = assigned_to;
+        list[index].assignee_name = 'Dr. Vikram Malhotra';
+        list[index].updated_at = new Date().toISOString();
+        setStored(STORAGE_KEYS.CASES, list);
+        return list[index];
+      }
+      return MOCK_CASES[0];
     }
   },
 
@@ -620,15 +805,19 @@ export const api = {
       });
       return await handleResponse<InvestigationCase>(res);
     } catch {
-      const c = MOCK_CASES.find(item => item.id === caseId) || MOCK_CASES[0];
-      return {
-        ...c,
-        decision,
-        decision_notes,
-        status: 'resolved',
-        decided_at: new Date().toISOString(),
-        decided_by: 'Dr. Vikram Malhotra'
-      };
+      const list = getStored<InvestigationCase[]>(STORAGE_KEYS.CASES, MOCK_CASES);
+      const index = list.findIndex(item => item.id === caseId);
+      if (index !== -1) {
+        list[index].decision = decision;
+        list[index].decision_notes = decision_notes;
+        list[index].status = 'resolved';
+        list[index].decided_at = new Date().toISOString();
+        list[index].decided_by = 'Dr. Vikram Malhotra';
+        list[index].updated_at = new Date().toISOString();
+        setStored(STORAGE_KEYS.CASES, list);
+        return list[index];
+      }
+      return MOCK_CASES[0];
     }
   },
 
@@ -646,6 +835,7 @@ export const api = {
         buckets: Record<string, any[]>;
       }>(res);
     } catch {
+      const fdrs = getStored<FDRRecord[]>(STORAGE_KEYS.FDRS, MOCK_FDRS);
       return {
         as_of_date: new Date().toISOString().slice(0, 10),
         totals: {
@@ -661,10 +851,10 @@ export const api = {
           'beyond_90_days': 7,
         },
         buckets: {
-          '30_days': [MOCK_FDRS[2]],
-          '60_days': [MOCK_FDRS[0]],
-          '90_days': [MOCK_FDRS[4]],
-          'beyond_90_days': [MOCK_FDRS[1], MOCK_FDRS[3], MOCK_FDRS[5]],
+          '30_days': [fdrs[2] || MOCK_FDRS[2]],
+          '60_days': [fdrs[0] || MOCK_FDRS[0]],
+          '90_days': [fdrs[4] || MOCK_FDRS[4]],
+          'beyond_90_days': [fdrs[1] || MOCK_FDRS[1]],
         }
       };
     }
@@ -741,7 +931,7 @@ export const api = {
       });
       return await handleResponse<AuditEvent[]>(res);
     } catch {
-      return MOCK_AUDIT_EVENTS;
+      return getStored<AuditEvent[]>(STORAGE_KEYS.AUDIT, MOCK_AUDIT_EVENTS);
     }
   },
 
@@ -758,22 +948,60 @@ export const api = {
         verified_at: string;
       }>(res);
     } catch {
+      const events = getStored<AuditEvent[]>(STORAGE_KEYS.AUDIT, MOCK_AUDIT_EVENTS);
       return {
         is_valid: true,
-        total_events: 1092,
-        message: 'Sequential cryptographic hash chain verified intact. All blocks match SHA-256 state transitions.',
+        total_events: events.length || 1092,
+        message: 'Sequential cryptographic hash chain verified intact. All state transitions match SHA-256 ledger.',
         verified_at: new Date().toISOString()
       };
     }
   },
 
-  // Reports
+  // Reports (Generates real CSV blobs in-browser on GitHub Pages)
   getFDRsCSVUrl(institution_id?: string): string {
-    const query = institution_id ? `?institution_id=${institution_id}` : '';
-    return `${API_BASE}/reports/fdr/csv${query}`;
+    const list = getStored<FDRRecord[]>(STORAGE_KEYS.FDRS, MOCK_FDRS);
+    const rows = [
+      ['ID', 'Institution', 'FDR Number', 'Bank', 'Branch', 'IFSC', 'Amount', 'Issue Date', 'Maturity Date', 'Status', 'Risk Score']
+    ];
+    list.forEach(f => {
+      rows.push([
+        f.id,
+        f.institution_name || '',
+        f.display_fdr_number,
+        f.bank_name,
+        f.branch_name,
+        f.ifsc_code,
+        String(f.principal_amount),
+        f.issue_date,
+        f.maturity_date,
+        f.workflow_status,
+        String(f.risk_score)
+      ]);
+    });
+    const csvContent = rows.map(r => r.map(c => `"${String(c).replace(/"/g, '""')}"`).join(',')).join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    return URL.createObjectURL(blob);
   },
 
   getFindingsCSVUrl(): string {
-    return `${API_BASE}/reports/findings/csv`;
+    const list = getStored<RiskFlag[]>(STORAGE_KEYS.FINDINGS, MOCK_FINDINGS);
+    const rows = [
+      ['ID', 'FDR ID', 'Rule', 'Severity', 'Explanation', 'Status', 'Created At']
+    ];
+    list.forEach(f => {
+      rows.push([
+        f.id,
+        f.fdr_id,
+        f.rule_name,
+        f.severity,
+        f.explanation,
+        f.status,
+        f.created_at
+      ]);
+    });
+    const csvContent = rows.map(r => r.map(c => `"${String(c).replace(/"/g, '""')}"`).join(',')).join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    return URL.createObjectURL(blob);
   }
 };
