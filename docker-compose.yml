@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: fdr_guardian_db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-fdr_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fdr_secure_password_2026}
+      POSTGRES_DB: ${POSTGRES_DB:-fdr_guardian}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fdr_user -d fdr_guardian"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: fdr_guardian_api
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql://fdr_user:fdr_secure_password_2026@db:5432/fdr_guardian
+      - SECRET_KEY=${SECRET_KEY:-fdr-guardian-production-secret-key-32bytes}
+      - ENV=production
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./storage:/storage
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: fdr_guardian_ui
+    depends_on:
+      - backend
+    ports:
+      - "3000:80"
+
+volumes:
+  postgres_data:
+
